@@ -1,0 +1,174 @@
+---
+title: "LLuis0406_TCGA"
+output: html_document
+---
+
+```{r, echo=FALSE}
+require(survival)
+require(simPH)
+
+ESCA.dir = "/home/jamesban/Desktop/Projects/Lluis/TCGA_ESCA_exp_HiSeq-2015-02-24/"
+HNSC.dir = "/home/jamesban/Desktop/Projects/Lluis/TCGA_HNSC_exp_HiSeqV2-2015-02-24/"
+BRCA.dir = "/home/jamesban/Desktop/Projects/Lluis/TCGA_BRCA_exp_HiSeqV2-2015-02-24/"
+Lluis_dir = "/home/jamesban/Desktop/Projects/Lluis/Survival/"
+
+# clinical infomation
+ESCA.info.raw = read.table(paste0(ESCA.dir, "clinical_data"), sep="\t", header = T, check.names=F)
+HNSC.info.raw = read.table(paste0(HNSC.dir, "clinical_data"), sep="\t", header = T, check.names=F)
+BRCA.info.raw = read.table(paste0(BRCA.dir, "clinical_data"), sep="\t", header = T, check.names=F)
+
+# gene expression matrix
+ESCA.expr = read.table(paste0(ESCA.dir, "genomicMatrix"), sep="\t", header = T, check.names=F)
+HNSC.expr = read.table(paste0(HNSC.dir, "genomicMatrix"), sep="\t", header = T, check.names=F)
+BRCA.expr = read.table(paste0(BRCA.dir, "genomicMatrix"), sep="\t", header = T, check.names=F)
+
+rownames(ESCA.expr) = (ESCA.expr$sample)
+rownames(HNSC.expr) = (HNSC.expr$sample)
+rownames(BRCA.expr) = (BRCA.expr$sample)
+
+# survival infor
+columns_to_keep = c("sampleID", "days_to_death", "days_to_last_followup", "_TIME_TO_EVENT", "histological_type", "pathologic_stage", "sample_type", "vital_status")
+ESCA.info = ESCA.info.raw[, columns_to_keep]
+ESCA.info$event = ifelse(ESCA.info$vital_status=="LIVING", 0, 1)
+HNSC.info = HNSC.info.raw[, columns_to_keep]
+HNSC.info$event = ifelse(HNSC.info$vital_status=="LIVING", 0, 1)
+BRCA.info = BRCA.info.raw[, columns_to_keep]
+BRCA.info$event = ifelse(BRCA.info$vital_status=="LIVING", 0, 1)
+
+# merge Stage type A, B, C
+ESCA.info$pathologic_stage_slim = factor(gsub("A|B|C", "", ESCA.info$pathologic_stage))
+ESCA.info$Stage = ESCA.info$pathologic_stage_slim
+levels(ESCA.info$Stage) = c(NA, "0", "1", "2", "3", "4")
+
+HNSC.info$pathologic_stage_slim = factor(gsub("A|B|C", "", HNSC.info$pathologic_stage))
+HNSC.info$Stage = HNSC.info$pathologic_stage_slim
+levels(HNSC.info$Stage) = c(NA, "1", "2", "3", "4")
+
+BRCA.info$pathologic_stage_slim = factor(gsub("A|B|C", "", BRCA.info$pathologic_stage))
+BRCA.info$Stage = as.character(BRCA.info$pathologic_stage_slim)
+BRCA.info$Stage = ifelse(BRCA.info$Stage=="Stage III"|BRCA.info$Stage=="Stage IV"|BRCA.info$Stage=="Stage X", 
+                         "Stage III+", BRCA.info$Stage)
+BRCA.info = BRCA.info[BRCA.info$Stage=="Stage I"|BRCA.info$Stage=="Stage II"|BRCA.info$Stage=="Stage III+"|BRCA.info$Stage=="", ]
+BRCA.info$Stage = factor(BRCA.info$Stage)
+levels(BRCA.info$Stage) = c(NA, "1", "2", "3+")
+
+# interested genes
+genes_ESCA = c("CBX4", "CBX8", "RYBP", "KDM2B")
+genes_HNSC = c("PHC3", "RYBP", "KDM2B")
+genes_BRCA = c("CBX4", "CBX8", "RNF2", "RYBP", "KDM2B")
+
+# select samples including normal
+ESCA.info.selectedAll = subset(ESCA.info, histological_type=="Esophagus Squamous Cell Carcinoma")
+ESCA.expr.selectedAll = ESCA.expr[, match(ESCA.info.selectedAll$sampleID, colnames(ESCA.expr))]
+
+HNSC.info.selectedAll = subset(HNSC.info, histological_type=="Head and Neck Squamous Cell Carcinoma")
+tmp.ID = match(HNSC.info.selectedAll$sampleID, colnames(HNSC.expr))
+HNSC.info.selectedAll = HNSC.info.selectedAll[!is.na(tmp.ID),]
+HNSC.expr.selectedAll = HNSC.expr[, na.omit(tmp.ID)]
+
+BRCA.info.selectedAll = BRCA.info
+tmp.ID = match(BRCA.info.selectedAll$sampleID, colnames(BRCA.expr))
+BRCA.info.selectedAll = BRCA.info.selectedAll[!is.na(tmp.ID),]
+BRCA.expr.selectedAll = BRCA.expr[, na.omit(tmp.ID)]
+
+# select only tumor samples
+ESCA.info.selected = subset(ESCA.info.selectedAll, sample_type=="Primary Tumor")
+HNSC.info.selected = subset(HNSC.info.selectedAll, sample_type=="Primary Tumor")
+BRCA.info.selected = subset(BRCA.info.selectedAll, sample_type=="Primary Tumor")
+
+# box plot for normal, stage 1, 2, 3, 4, all stages
+comp_normal_stages = function(data_expr, data_info, gene_name, Normal="Solid Tissue Normal", Stages=1:4){
+  expr_n_col = which(data_info$sample_type=="Solid Tissue Normal")
+  expr_n = as.numeric(data_expr[rownames(data_expr)==gene_name, expr_n_col])
+  expr_stage = list()
+  for (i in 1:length(Stages)){
+    expr_stage_col = which(data_info$Stage==Stages[i]&data_info$sample_type=="Primary Tumor")
+    expr_stage[[i]] = as.numeric(data_expr[rownames(data_expr)==gene_name, expr_stage_col])
+  }
+  test_normal_vs_all = round(wilcox.test(expr_n, unlist(expr_stage))$p.value, 3)
+  if(test_normal_vs_all==0){
+    test_normal_vs_all = "<0.001"
+  }else{
+    test_normal_vs_all = paste0("=",test_normal_vs_all)
+  }
+  boxplot(c(list(expr_n), expr_stage, list(unlist(expr_stage))), names=c("normal", paste0("stage", Stages), "allstages"), 
+          las=2, cex.axis=0.65, main=gene_name)
+  mtext(paste0("(Normal vs All stages, p", test_normal_vs_all, ")"))
+}
+TCGA_surv_per_gene = function(data_info, data_expr, gene_symbol, out_dir){
+  expr_g = data_expr[rownames(data_expr)==gene_symbol, match(data_info$sampleID, colnames(data_expr))]
+  data_info$expression = as.character(ifelse(expr_g >= median(as.matrix(expr_g)), "High", "Low"))
+
+  data_info$`_TIME_TO_EVENT` = as.numeric(data_info$`_TIME_TO_EVENT`*12/365)
+  #log-rank test for high vs low
+  TEMP.test = survdiff(Surv(`_TIME_TO_EVENT`, event) ~  expression, data=data_info)
+  p.TEMP.test = round(1-pchisq(TEMP.test$chisq, df=1), 3)
+
+  #pdf(file=paste0(out_dir,"/",gene_symbol,"_TCGA.pdf"), width=10, height=12)
+  plot(survfit(Surv(`_TIME_TO_EVENT`, event) ~ expression, data = data_info), col=c("red","blue"), lty=c(1,3), ylab = "Survival probability", xlab = "Month", bty="L", main=gene_symbol)
+  legend(x="topright", c("High", "Low"), lty=c(1,3), col=c("red","blue"), bty = "n", title = "Expression") 
+  mtext(paste0("(High vs Low, log-rank p=", p.TEMP.test, ")"))
+  TEMP.test.cox = coxph(Surv(`_TIME_TO_EVENT`, event) ~ factor(Stage) + expression, data = data_info)
+  print(summary(TEMP.test.cox))
+  #dev.off()
+}
+
+```
+
+#              Esophageal squamous cell carcinoma:
+#### Number of samples per sample type and cancer stage:
+```{r}
+table(ESCA.info.selectedAll$pathologic_stage_slim)
+table(ESCA.info.selectedAll$sample_type)
+```
+
+```{r, echo=FALSE}
+comp_normal_stages(ESCA.expr.selectedAll, ESCA.info.selectedAll, genes_ESCA[1])
+TCGA_surv_per_gene(ESCA.info.selected, ESCA.expr, genes_ESCA[1], Lluis_dir)
+comp_normal_stages(ESCA.expr.selectedAll, ESCA.info.selectedAll, genes_ESCA[2])
+TCGA_surv_per_gene(ESCA.info.selected, ESCA.expr, genes_ESCA[2], Lluis_dir)
+comp_normal_stages(ESCA.expr.selectedAll, ESCA.info.selectedAll, genes_ESCA[3])
+TCGA_surv_per_gene(ESCA.info.selected, ESCA.expr, genes_ESCA[3], Lluis_dir)
+comp_normal_stages(ESCA.expr.selectedAll, ESCA.info.selectedAll, genes_ESCA[4])
+TCGA_surv_per_gene(ESCA.info.selected, ESCA.expr, genes_ESCA[4], Lluis_dir)
+```
+  
+  
+  
+#              Head and neck squamous cell carcinoma:
+#### Number of samples per sample type and cancer stage:
+```{r}
+table(HNSC.info.selectedAll$pathologic_stage_slim)
+table(HNSC.info.selectedAll$sample_type)
+```
+
+```{r, echo=FALSE}
+comp_normal_stages(HNSC.expr.selectedAll, HNSC.info.selectedAll, genes_HNSC[1])
+TCGA_surv_per_gene(HNSC.info.selected, HNSC.expr, genes_HNSC[1], Lluis_dir)
+comp_normal_stages(HNSC.expr.selectedAll, HNSC.info.selectedAll, genes_HNSC[2])
+TCGA_surv_per_gene(HNSC.info.selected, HNSC.expr, genes_HNSC[2], Lluis_dir)
+comp_normal_stages(HNSC.expr.selectedAll, HNSC.info.selectedAll, genes_HNSC[3])
+TCGA_surv_per_gene(HNSC.info.selected, HNSC.expr, genes_HNSC[3], Lluis_dir)
+```
+  
+  
+  
+#              Breast invasive carcinoma:
+#### Number of samples per sample type and cancer stage:
+```{r}
+table(BRCA.info.selectedAll$pathologic_stage_slim)
+table(BRCA.info.selectedAll$sample_type)
+```
+
+```{r, echo=FALSE}
+comp_normal_stages(BRCA.expr.selectedAll, BRCA.info.selectedAll, genes_BRCA[1], Stages=c("1","2","3+"))
+TCGA_surv_per_gene(BRCA.info.selected, BRCA.expr, genes_BRCA[1], Lluis_dir)
+comp_normal_stages(BRCA.expr.selectedAll, BRCA.info.selectedAll, genes_BRCA[2], Stages=c("1","2","3+"))
+TCGA_surv_per_gene(BRCA.info.selected, BRCA.expr, genes_BRCA[2], Lluis_dir)
+comp_normal_stages(BRCA.expr.selectedAll, BRCA.info.selectedAll, genes_BRCA[3], Stages=c("1","2","3+"))
+TCGA_surv_per_gene(BRCA.info.selected, BRCA.expr, genes_BRCA[3], Lluis_dir)
+comp_normal_stages(BRCA.expr.selectedAll, BRCA.info.selectedAll, genes_BRCA[4], Stages=c("1","2","3+"))
+TCGA_surv_per_gene(BRCA.info.selected, BRCA.expr, genes_BRCA[4], Lluis_dir)
+comp_normal_stages(BRCA.expr.selectedAll, BRCA.info.selectedAll, genes_BRCA[5], Stages=c("1","2","3+"))
+TCGA_surv_per_gene(BRCA.info.selected, BRCA.expr, genes_BRCA[5], Lluis_dir)
+```
